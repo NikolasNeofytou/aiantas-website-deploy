@@ -1,0 +1,204 @@
+# The club website's deploy: Αίαντας Αλεθρικού, aiantasalethrikou2014.com.
+#
+# WHY THIS REPOSITORY IS PUBLIC (ADR 0026 in the club repo). The site's source
+# is private, in NikolasNeofytou/aiantas-squad-sheet. Private repositories
+# share one monthly allowance of Actions minutes; in October 2026 other
+# projects spent it, and the site stopped deploying on 30 Oct. Minutes here
+# are free and nobody else can spend them. This repository holds this
+# workflow and nothing else of the club's: it reads the source with a
+# read-only key when it needs it.
+#
+# The same job as ADR 0022, from here:
+#   - every 15 minutes, all day: deploys if the coach has published since the
+#     live site was built, or if the site's source on main has changed. Both
+#     answers come from two small files on the live site, so nothing here keeps
+#     state. When neither has changed it stops in seconds;
+#   - every morning: rebuilds anyway, because the result strip's «today» moves
+#     with the date, not with a publish;
+#   - a push here, or «Run workflow»: deploys.
+#
+# It never writes to the club repo; its key can only read. It commits here
+# once a month, because GitHub switches off a public repository's schedule
+# after 60 days without a commit.
+
+name: Website
+
+on:
+  schedule:
+    # Every 15 minutes, off the hour, when GitHub's queue is shortest.
+    - cron: '7,22,37,52 * * * *'
+    # The morning rebuild: 05:00 in Cyprus in winter, 06:00 in summer.
+    - cron: '0 3 * * *'
+  push:
+    branches: [main]
+    paths: ['.github/workflows/**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# -eo pipefail: a failed fetch or a missing path stops the run, rather than
+# hashing whatever half arrived.
+defaults:
+  run:
+    shell: bash
+
+env:
+  SOURCE_REPO: git@github.com:NikolasNeofytou/aiantas-squad-sheet.git
+  # What build.py and the deploy read. A change anywhere else on main (the
+  # app, the docs) leaves the site alone.
+  SITE_PATHS: >-
+    squad-sheet/site
+    squad-sheet/design
+    squad-sheet/scripts/pull-published.mjs
+    squad-sheet/firebase.json
+    squad-sheet/.firebaserc
+  CLUB_PROJECT: aiantas-club
+  SITE_URL: https://aiantasalethrikou2014.com
+  SNAPSHOT_URL: https://firebasestorage.googleapis.com/v0/b/aeneid-5b1c1.firebasestorage.app/o/published%2Fcurrent.json?alt=media
+  # GitHub's published SSH host key (api.github.com/meta), so the fetch never
+  # trusts whoever answers first.
+  GITHUB_HOST_KEY: github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Never two deploys at once, and never cancel one halfway.
+    concurrency:
+      group: website-deploy
+      cancel-in-progress: false
+    steps:
+      - name: Read access to the club repo
+        env:
+          DEPLOY_KEY: ${{ secrets.SQUAD_SHEET_DEPLOY_KEY }}
+        run: |
+          if [ -z "$DEPLOY_KEY" ]; then
+            echo "::error::The secret SQUAD_SHEET_DEPLOY_KEY is not set. See README.md."
+            exit 1
+          fi
+          install -m 600 /dev/null "$RUNNER_TEMP/deploy-key"
+          printf '%s\n' "$DEPLOY_KEY" > "$RUNNER_TEMP/deploy-key"
+          printf '%s\n' "$GITHUB_HOST_KEY" > "$RUNNER_TEMP/known_hosts"
+          echo "GIT_SSH_COMMAND=ssh -i $RUNNER_TEMP/deploy-key -o IdentitiesOnly=yes -o UserKnownHostsFile=$RUNNER_TEMP/known_hosts -o StrictHostKeyChecking=yes" >> "$GITHUB_ENV"
+
+      # Commits and folders only, about 20 KB: enough to tell whether the
+      # site's source changed, without downloading it.
+      - name: What is on main?
+        id: source
+        run: |
+          git init -q src
+          cd src
+          git remote add origin "$SOURCE_REPO"
+          git fetch -q --depth 1 --filter=blob:none origin main
+          read -ra paths <<< "$SITE_PATHS"
+          trees=$(git rev-parse "${paths[@]/#/FETCH_HEAD:}")
+          version=$(printf '%s\n' "$trees" | sha1sum | cut -c1-12)
+          echo "main is at $(git rev-parse --short FETCH_HEAD); the site's source there is $version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      # Only the 15-minute checks ask. The morning rebuild, a push here and a
+      # manual run always build.
+      - name: Has anything changed since the live site was built?
+        id: check
+        if: github.event_name == 'schedule' && github.event.schedule != '0 3 * * *'
+        env:
+          SOURCE_VERSION: ${{ steps.source.outputs.version }}
+        run: |
+          published=$(curl -fsS "$SNAPSHOT_URL" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("publishedAt"))' || echo unreachable)
+          # The query string sidesteps any cached copy of the files.
+          live_published=$(curl -fsS "$SITE_URL/published-version.txt?t=$(date +%s)" | tr -d '[:space:]' || echo none)
+          live_source=$(curl -fsS "$SITE_URL/source-version.txt?t=$(date +%s)" | tr -d '[:space:]' || echo none)
+          echo "snapshot: $published · live site built from: $live_published"
+          echo "source:   $SOURCE_VERSION · live site built from: ${live_source:-none}"
+          if [ "$published" = "unreachable" ]; then
+            echo "The snapshot is out of reach; the next check tries again."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          elif [ "$published" != "$live_published" ] || [ "$SOURCE_VERSION" != "$live_source" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Only the folders the build reads, about 6 MB; the app stays where it is.
+      - name: Fetch the site's source
+        if: steps.check.outputs.changed != 'false'
+        working-directory: src
+        run: |
+          git sparse-checkout set squad-sheet/site squad-sheet/design squad-sheet/scripts
+          git checkout -q FETCH_HEAD
+
+      - uses: actions/setup-node@v4
+        if: steps.check.outputs.changed != 'false'
+        with:
+          node-version: '20'
+
+      - uses: actions/setup-python@v5
+        if: steps.check.outputs.changed != 'false'
+        with:
+          python-version: '3.12'
+
+      - name: Pull the coach's snapshot
+        if: steps.check.outputs.changed != 'false'
+        working-directory: src/squad-sheet
+        run: node scripts/pull-published.mjs
+
+      # Chrome is on GitHub's Ubuntu image, so new share cards are drawn here
+      # (ADR 0020). Without it the build still finishes and says why.
+      - name: Build the site
+        if: steps.check.outputs.changed != 'false'
+        working-directory: src/squad-sheet
+        env:
+          SOURCE_VERSION: ${{ steps.source.outputs.version }}
+        run: |
+          python3 site/build.py
+          printf '%s\n' "$SOURCE_VERSION" > site/source-version.txt
+
+      - name: Deploy to Firebase Hosting
+        if: steps.check.outputs.changed != 'false'
+        working-directory: src/squad-sheet
+        env:
+          SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_AIANTAS_CLUB }}
+        run: |
+          if [ -z "$SERVICE_ACCOUNT" ]; then
+            echo "::error::The secret FIREBASE_SERVICE_ACCOUNT_AIANTAS_CLUB is not set. See README.md."
+            exit 1
+          fi
+          export GOOGLE_APPLICATION_CREDENTIALS="$RUNNER_TEMP/firebase-sa.json"
+          install -m 600 /dev/null "$GOOGLE_APPLICATION_CREDENTIALS"
+          printf '%s' "$SERVICE_ACCOUNT" > "$GOOGLE_APPLICATION_CREDENTIALS"
+          npx --yes firebase-tools@15.22.4 deploy --only hosting:website --project "$CLUB_PROJECT" --non-interactive
+          rm -f "$GOOGLE_APPLICATION_CREDENTIALS"
+
+      - name: Check the live site took it
+        if: steps.check.outputs.changed != 'false'
+        working-directory: src/squad-sheet
+        run: |
+          want=$(cat site/published-version.txt site/source-version.txt | tr -d '[:space:]')
+          got=$(for f in published-version.txt source-version.txt; do curl -fsS "$SITE_URL/$f?nocache=$GITHUB_RUN_ID"; done | tr -d '[:space:]')
+          echo "built from: $want · live: $got"
+          [ "$want" = "$got" ]
+
+  # GitHub switches off the schedule of a public repository after 60 days
+  # without a commit. A dated line once a month keeps it on.
+  keep-alive:
+    if: github.event_name == 'schedule' && github.event.schedule == '0 3 * * *'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Commit once a month
+        run: |
+          age=$(( $(date +%s) - $(git log -1 --format=%ct) ))
+          if [ "$age" -lt $(( 30 * 86400 )) ]; then
+            echo "The last commit is $(( age / 86400 )) days old; nothing to do."
+            exit 0
+          fi
+          date -u +%Y-%m-%d > alive.txt
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -qam 'Still deploying'
+          git push -q
