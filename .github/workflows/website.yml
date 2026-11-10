@@ -128,10 +128,12 @@ jobs:
           git sparse-checkout set squad-sheet/site squad-sheet/design squad-sheet/scripts
           git checkout -q FETCH_HEAD
 
+      # 22, not 20: the club's media renderer (ADR 0033 in the club repo) drives
+      # Chrome over the DevTools protocol with Node's own global WebSocket.
       - uses: actions/setup-node@v4
         if: steps.check.outputs.changed != 'false'
         with:
-          node-version: '20'
+          node-version: '22'
 
       - uses: actions/setup-python@v5
         if: steps.check.outputs.changed != 'false'
@@ -143,8 +145,17 @@ jobs:
         working-directory: src/squad-sheet
         run: node scripts/pull-published.mjs
 
+      # The reels are encoded with ffmpeg (ADR 0033), which GitHub's Ubuntu
+      # image does not carry. Only builds pay for it, never the 15-minute checks.
+      - name: ffmpeg for the club's reels
+        if: steps.check.outputs.changed != 'false'
+        run: |
+          command -v ffmpeg >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends ffmpeg >/dev/null; }
+          ffmpeg -version | head -1
+
       # Chrome is on GitHub's Ubuntu image, so new share cards are drawn here
-      # (ADR 0020). Without it the build still finishes and says why.
+      # (ADR 0020), and the club's pictures and reels for social media
+      # (ADR 0033). Without it the build still finishes and says why.
       - name: Build the site
         if: steps.check.outputs.changed != 'false'
         working-directory: src/squad-sheet
