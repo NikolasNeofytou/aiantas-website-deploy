@@ -9,7 +9,7 @@
 # read-only key when it needs it.
 #
 # The same job as ADR 0022, from here:
-#   - every 15 minutes, all day: deploys if the coach has published since the
+#   - every 5 minutes, all day: deploys if the coach has published since the
 #     live site was built, or if the site's source on main has changed. Both
 #     answers come from two small files on the live site, so nothing here keeps
 #     state. When neither has changed it stops in seconds;
@@ -25,8 +25,12 @@ name: Website
 
 on:
   schedule:
-    # Every 15 minutes, off the hour, when GitHub's queue is shortest.
-    - cron: '7,22,37,52 * * * *'
+    # Every 5 minutes, off the hour, when GitHub's queue is shortest: the
+    # shortest GitHub runs. It was 15 until matchday, 21 Nov 2026 (his words:
+    # «why does it take 15 minutes to pick it up»): a Publish now reaches the
+    # site in about 5 to 12 minutes, the check itself takes ten seconds, and
+    # minutes in a public repository are free.
+    - cron: '2-59/5 * * * *'
     # The morning rebuild: 05:00 in Cyprus in winter, 06:00 in summer.
     - cron: '0 3 * * *'
   push:
@@ -97,7 +101,7 @@ jobs:
           echo "main is at $(git rev-parse --short FETCH_HEAD); the site's source there is $version"
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
-      # Only the 15-minute checks ask. The morning rebuild, a push here and a
+      # Only the 5-minute checks ask. The morning rebuild, a push here and a
       # manual run always build.
       - name: Has anything changed since the live site was built?
         id: check
@@ -146,7 +150,7 @@ jobs:
         run: node scripts/pull-published.mjs
 
       # The reels are encoded with ffmpeg (ADR 0033), which GitHub's Ubuntu
-      # image does not carry. Only builds pay for it, never the 15-minute checks.
+      # image does not carry. Only builds pay for it, never the 5-minute checks.
       - name: ffmpeg for the club's reels
         if: steps.check.outputs.changed != 'false'
         run: |

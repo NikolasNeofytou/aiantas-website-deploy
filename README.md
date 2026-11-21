@@ -8,7 +8,7 @@ workflow, [`.github/workflows/website.yml`](.github/workflows/website.yml),
 and it is public so that its GitHub Actions minutes are free and no other
 project can use them up (ADR 0026 in the source repository).
 
-Every 15 minutes it checks whether the coach has published a result, or
+Every 5 minutes it checks whether the coach has published a result, or
 whether the site's source has changed on `main`, and deploys if either has.
 Every morning it rebuilds anyway.
 
